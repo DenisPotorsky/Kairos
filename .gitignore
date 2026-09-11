@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+
+# Generated calendar files
+*.ics
+
+# Local data files
+data/*.pdf
+data/*.docx
+data/*.xls
+data/*.xlsx
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+*.log
