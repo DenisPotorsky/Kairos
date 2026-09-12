@@ -2,7 +2,7 @@
 Kairos Telegram Bot v3.3 — с поддержкой Консерватории (УГК).
 """
 import asyncio
-import logging
+from loguru import logger
 import sys
 import os
 from datetime import datetime
@@ -15,8 +15,11 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import FSInputFile
 from aiogram.utils.keyboard import ReplyKeyboardBuilder
+from aiohttp import web
 
 # Импортируем константы из main.py
+from kairos.parsers.factory import get_parser
+from main import deduplicate_events
 from main import (
     FILE_PH_HALLS, FILE_PH_CHOIR, FILE_EC_PIANO, FILE_PH_SEASON,
     FILE_UGK_HALLS # 🆕 Новый импорт
@@ -25,13 +28,10 @@ from main import (
 # --- НАСТРОЙКИ ---
 API_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 DATA_DIR = Path("data")
-BATCH_DELAY = 7
+BATCH_DELAY = 10
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger(__name__)
+
+# loguru auto-configured
 
 if not API_TOKEN:
     logger.critical("❌ ОШИБКА: Токен не найден! Проверьте файл .env")
@@ -47,6 +47,7 @@ def get_main_keyboard():
     builder.button(text="📅 Сегодня")
     builder.button(text="🔄 Обновить")
     builder.button(text="🏠 Главная")
+    builder.button(text="🔗 Подписка")
     builder.adjust(2, 1) 
     return builder.as_markup(resize_keyboard=True, input_field_placeholder="Меню Kairos...")
 
@@ -95,6 +96,7 @@ def get_today_events_text():
             except Exception as e:
                 logger.error(f"Ошибка парсинга {filename}: {e}")
 
+    all_events = deduplicate_events(all_events)
     today = datetime.now().date()
     # today = datetime(2026, 9, 14).date() # Для теста (понедельник)
     
@@ -184,6 +186,22 @@ async def cmd_update_manual(message: types.Message):
     await run_batch_update(message)
     await message.answer("Меню:", reply_markup=get_main_keyboard())
 
+@dp.message(Command("subscribe"))
+@dp.message(F.text == "🔗 Подписка")
+async def cmd_subscribe(message: types.Message):
+    url = "http://10.95.84.152:" + str(HTTP_PORT) + "/kairos.ics"
+    lines = [
+        "🔗 *Ссылка для подписки:*",
+        url,
+        "",
+        "*Как добавить в Apple Calendar:*",
+        "1. Файл -> Новая подписка на календарь",
+        "2. Вставьте ссылку выше",
+        "3. Календарь будет обновляться автоматически",
+    ]
+    await message.answer(chr(10).join(lines), parse_mode="Markdown")
+
+
 @dp.message(lambda m: m.document)
 async def handle_docs(message: types.Message):
     doc = message.document
@@ -209,7 +227,11 @@ async def handle_docs(message: types.Message):
         elif file_name.endswith(".docx"): target_name = FILE_EC_PIANO
         elif file_name.endswith((".xls", ".xlsx")): target_name = FILE_UGK_HALLS # 🆕 Умный fallback для Excel
         
-        await message.answer(f"🤔 Не понял тип '{doc.file_name}'. Сохраняю как '{target_name}'.")
+        if not target_name:
+            await message.answer(f"🤔 Не понял тип '{doc.file_name}'. Файл проигнорирован.")
+            return
+
+    await message.answer(f"✅ Распознан как '{target_name}'. Сохраняю...")
 
     if target_name:
         file_path = DATA_DIR / target_name
@@ -221,9 +243,44 @@ async def handle_docs(message: types.Message):
 
 # --- ЗАПУСК ---
 
+# --- HTTP-СЕРВЕР ДЛЯ ПОДПИСКИ НА КАЛЕНДАРЬ ---
+ICS_FILE = Path("kairos_all.ics")
+HTTP_PORT = 8080
+
+
+async def handle_ics(request):
+    """Отдаёт .ics файл по HTTP для подписки календаря."""
+    if not ICS_FILE.exists():
+        return web.Response(text="Календарь ещё не собран", status=404)
+    return web.FileResponse(
+        ICS_FILE,
+        headers={
+            "Content-Type": "text/calendar; charset=utf-8",
+            "Content-Disposition": "inline; filename=kairos.ics",
+        },
+    )
+
+
+async def start_http_server():
+    """Запускает HTTP-сервер для раздачи .ics файла."""
+    app = web.Application()
+    app.router.add_get("/kairos.ics", handle_ics)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", HTTP_PORT)
+    await site.start()
+    logger.info(f"🌐 HTTP-сервер запущен на порту {HTTP_PORT}")
+    logger.info(f"📅 URL подписки: http://localhost:{HTTP_PORT}/kairos.ics")
+    return runner
+
+
 async def main():
     logger.info(f"🤖 Бот Kairos запущен (Batch delay: {BATCH_DELAY}s)...")
-    await dp.start_polling(bot)
+    runner = await start_http_server()
+    try:
+        await dp.start_polling(bot)
+    finally:
+        await runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())

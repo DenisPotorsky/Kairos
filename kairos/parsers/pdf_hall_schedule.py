@@ -108,7 +108,7 @@ class PdfHallScheduleParser(BaseParser):
         day = int(match.group(1))
         month = int(match.group(2))
         try:
-            return datetime(2026, month, day)
+            return datetime(datetime.now().year, month, day)
         except ValueError:
             return None
 

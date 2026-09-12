@@ -53,7 +53,7 @@ class DocxPianoServiceParser(BaseParser):
         month = int(date_match.group(2))
         
         try:
-            base_date = datetime(2026, month, day)
+            base_date = datetime(datetime.now().year, month, day)
         except ValueError:
             return None
 

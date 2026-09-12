@@ -69,7 +69,7 @@ class PdfRehearsalParser(BaseParser):
             desc = program_desc if program_desc else ""
 
             events.append(Event(
-                title=types[type_idx],
+                title=f"[Филармония] {types[type_idx]}",
                 start=start,
                 end=end,
                 event_type=event_type,
