@@ -70,14 +70,14 @@ class IcsExporter:
         if event.tags:
             desc_parts.append(f"Дирижёр/Ответственный: {', '.join(event.tags)}")
         desc_parts.append(f"Источник: {event.source_file}")
-        desc_parts.append(f"Приоритет: {event.priority.name}")
+        desc_parts.append(f"Приоритет: {event.priority}")
         ics.add("description", "\n".join(desc_parts))
 
         if event.location:
             ics.add("location", event.location)
 
         # Напоминания через timedelta
-        alarms = PRIORITY_ALARMS.get(event.priority.value, [timedelta(hours=-1)])
+        alarms = PRIORITY_ALARMS.get(event.priority, [timedelta(hours=-1)])
         for trigger in alarms:
             alarm = Alarm()
             alarm.add("action", "DISPLAY")
