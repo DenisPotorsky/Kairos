@@ -30,3 +30,4 @@ data/*.xlsx
 
 # Logs
 *.log
+.idea/
