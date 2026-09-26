@@ -1,168 +1,77 @@
-"""Парсер расписания залов Консерватории (УГК) — Финальная версия."""
+"""Парсер УГК с фильтром."""
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
-
+from loguru import logger
 from kairos.models import Event, EventType, Priority
 from kairos.parsers.base import BaseParser
 
-
 class ExcelUgkParser(BaseParser):
     ORG_NAME = "Консерватория"
+    ALLOWED_KEYWORDS = ["концерт", "настройка", "экзамен", "зачет", "запись"]
 
     def parse(self, file_path: Path) -> list[Event]:
-        # Поддерживаем и .xls и .xlsx
-        if not file_path.suffix.lower() in [".xls", ".xlsx"]:
-             print(f"⚠️ Пропуск {file_path.name}: неверное расширение")
-             return []
-             
-        events: list[Event] = []
-
+        if file_path.suffix.lower() not in [".xls", ".xlsx"]: return []
         try:
             from openpyxl import load_workbook
-        except ImportError:
-            print("❌ Ошибка: pip install openpyxl")
-            return []
+        except ImportError: return []
 
+        events = []
         try:
             wb = load_workbook(filename=file_path, data_only=True)
+            for sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                hall = "Малый зал УГК" if "малый" in sheet_name.lower() else "Большой зал УГК"
+                events.extend(self._parse_sheet(ws, file_path.name, hall))
+            wb.close()
+            logger.info(f"✅ УГК: {len(events)} событий")
         except Exception as e:
-            # Если openpyxl не смог (например, старый .xls), пробуем pandas как запасной вариант
-            return self._parse_with_pandas(file_path)
-
-        for sheet_name in wb.sheetnames:
-            ws = wb[sheet_name]
-            sheet_events = self._parse_sheet(ws, file_path.name)
-            events.extend(sheet_events)
-
+            logger.error(f"Ошибка УГК: {e}")
         return events
 
-    def _parse_with_pandas(self, file_path: Path) -> list[Event]:
-        """Запасной парсер через pandas (для HTML-таблиц)."""
-        import pandas as pd
-        events = []
-        try:
-            # Пробуем разные кодировки
-            for enc in ['utf-8', 'windows-1251']:
-                try:
-                    tables = pd.read_html(file_path, encoding=enc)
-                    for df in tables:
-                        # Преобразуем DataFrame в формат, похожий на openpyxl worksheet
-                        # Это упрощение, но для HTML-таблиц часто достаточно
-                        pass 
-                    break
-                except: continue
-        except: pass
-        return events
-
-    def _parse_sheet(self, ws, source: str) -> list[Event]:
+    def _parse_sheet(self, ws, source: str, hall: str) -> list[Event]:
         events = []
         current_date = None
-        current_hall = "Зал УГК" 
-
         for row in ws.iter_rows(values_only=True):
-            cells = [str(c).strip() if c is not None else "" for c in row]
-            full_row_text = " ".join(cells).lower()
+            cells = [str(c).strip() if c else "" for c in row]
 
-            if not any(cells):
-                continue
+            # Дата
+            m = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", cells[0])
+            if m:
+                try:
+                    y = int(m.group(3))
+                    if y < 100: y += 2000
+                    current_date = datetime(y, int(m.group(2)), int(m.group(1)))
+                except: pass
 
-            # 1. ПРОВЕРКА НА СМЕНУ ЗАЛА
-            # Ищем "большой зал" или "малый зал" в строке
-            if "большой зал" in full_row_text:
-                current_hall = "Большой зал УГК"
-                continue
-            
-            if "малый зал" in full_row_text:
-                current_hall = "Малый зал УГК"
-                continue
+            if not current_date or len(cells) < 3: continue
 
-            # 2. ПРОПУСК ЗАГОЛОВКОВ
-            if "дата" in full_row_text and "время" in full_row_text:
-                continue
+            t_str, title = cells[1], cells[2]
+            if not t_str or not title or "дата" in title.lower(): continue
 
-            # 3. ПОИСК ДАТЫ
-            found_date = False
-            for cell in cells:
-                date_match = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{2,4})", cell)
-                if date_match:
-                    day = int(date_match.group(1))
-                    month = int(date_match.group(2))
-                    year = int(date_match.group(3))
-                    if year < 100: year += 2000
-                    try:
-                        current_date = datetime(year, month, day)
-                        found_date = True
-                        break
-                    except ValueError:
-                        pass
-            
-            if found_date:
-                continue
+            # Фильтр
+            if not any(k in title.lower() for k in self.ALLOWED_KEYWORDS): continue
 
-            # 4. ПОИСК СОБЫТИЯ
-            time_str = ""
-            title_str = ""
-            
-            # Ищем время
-            for i, cell in enumerate(cells):
-                if re.search(r"\d{1,2}[.:]\d{2}", cell):
-                    time_str = cell
-                    # Название обычно в следующей ячейке
-                    if i + 1 < len(cells):
-                        title_str = cells[i+1]
-                    break
-            
-            # Если название не нашли рядом, ищем любую длинную строку
-            if not title_str:
-                for cell in cells:
-                    if len(cell) > 2 and cell != time_str and not re.match(r"^\d", cell):
-                        title_str = cell
-                        break
-
-            if current_date and time_str and title_str:
-                event = self._create_event(current_date, time_str, title_str, current_hall, source)
-                if event:
-                    events.append(event)
-
-        return events
-
-    def _create_event(self, base_date: datetime, time_str: str, title: str, hall: str, source: str) -> Event | None:
-        clean_time = time_str.replace(".", ":")
-        
-        match = re.search(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})", clean_time)
-        
-        if match:
-            start_dt = base_date.replace(hour=int(match.group(1)), minute=int(match.group(2)))
-            end_dt = base_date.replace(hour=int(match.group(3)), minute=int(match.group(4)))
-        else:
-            single_match = re.search(r"(\d{1,2}):(\d{2})", clean_time)
-            if single_match:
-                h, m = int(single_match.group(1)), int(single_match.group(2))
-                start_dt = base_date.replace(hour=h, minute=m)
-                end_dt = start_dt + timedelta(hours=2)
-            elif "после" in clean_time.lower():
-                start_dt = base_date.replace(hour=21, minute=0)
-                end_dt = start_dt + timedelta(hours=1)
+            # Время
+            clean_t = t_str.replace(".", ":").replace(" ", "")
+            m = re.search(r"(\d{1,2}):(\d{2})-(\d{1,2}):(\d{2})", clean_t)
+            if m:
+                s = current_date.replace(hour=int(m.group(1)), minute=int(m.group(2)))
+                e = current_date.replace(hour=int(m.group(3)), minute=int(m.group(4)))
             else:
-                return None
+                m2 = re.search(r"(\d{1,2}):(\d{2})", clean_t)
+                if not m2: continue
+                s = current_date.replace(hour=int(m2.group(1)), minute=int(m2.group(2)))
+                e = s + timedelta(hours=2)
 
-        event_type = EventType.REHEARSAL
-        lower_title = title.lower()
-        if "настройка" in lower_title:
-            event_type = EventType.TECHNICAL
-        elif "экзамен" in lower_title or "собрание" in lower_title:
-            event_type = EventType.MEETING
-        elif "концерт" in lower_title:
-            event_type = EventType.CONCERT
+            etype = EventType.REHEARSAL
+            if "концерт" in title.lower(): etype = EventType.CONCERT
+            elif "настройка" in title.lower(): etype = EventType.TECHNICAL
+            elif "запись" in title.lower(): etype = EventType.SERVICE
 
-        return Event(
-            title=f"[{self.ORG_NAME}] {title}",
-            start=start_dt,
-            end=end_dt,
-            event_type=event_type,
-            priority=Priority.P1,
-            source_file=source,
-            location=hall,
-            tags=()
-        )
+            events.append(Event(
+                title=f"[{self.ORG_NAME}] {title}", start=s, end=e,
+                event_type=etype, priority=Priority.P1,
+                source_file=source, location=hall
+            ))
+        return events
