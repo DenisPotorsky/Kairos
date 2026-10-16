@@ -1,9 +1,6 @@
-"""Фабрика парсеров Kairos — определяет нужный парсер по содержимому файла."""
+"""Фабрика парсеров Kairos."""
 
-import re
 from pathlib import Path
-
-import pdfplumber
 from loguru import logger
 
 from kairos.parsers.base import BaseParser
@@ -12,72 +9,48 @@ from kairos.parsers.docx_piano_service import DocxPianoServiceParser
 from kairos.parsers.docx_season import DocxSeasonParser
 from kairos.parsers.excel_ugk_parser import ExcelUgkParser
 from kairos.parsers.excel_choir_parser import ExcelChoirParser
-
-
-_PARSER_RULES: list[tuple[list[str], str | None, type[BaseParser]]] = [
-    # Консерватория (Excel)
-    (["угк", "консерватория", "ugk"], ".xlsx", ExcelUgkParser),
-    (["угк", "консерватория", "ugk"], ".xls", ExcelUgkParser),
-    
-    # Ельцин Центр: рояли (DOCX)
-    (["ельцин", "роял", "piano"], ".docx", DocxPianoServiceParser),
-    
-    # Филармония: сезон (DOCX)
-    (["сезон", "season"], ".docx", DocxSeasonParser),
-    
-    # Филармония: залы (PDF)
-    (["зал", "hall"], ".pdf", PdfHallScheduleParser),
-]
-
-_FALLBACK_MAP: dict[str, type[BaseParser]] = {
-    ".pdf": PdfHallScheduleParser,
-    ".docx": DocxPianoServiceParser,
-    ".xlsx": ExcelUgkParser,
-    ".xls": ExcelUgkParser,
-}
-
-
-def _detect_choir_parser(file_path: Path) -> BaseParser | None:
-    """Определяет тип графика хора по содержимому PDF."""
-    try:
-        with pdfplumber.open(file_path) as pdf:
-            page = pdf.pages[0]
-            tables = page.extract_tables()
-            if not tables: return None
-            
-            for row in tables[0]:
-                clean = [str(c).strip() if c else '' for c in row]
-                if len(clean) >= 6 and 'Дата' not in clean[0] and 'СИМФОНИЧЕСКИЙ' not in clean[0]:
-                    return ExcelChoirParser()
-            return None
-    except Exception as e:
-        logger.warning(f"Не удалось определить тип хора для {file_path}: {e}")
-        return None
-
+from kairos.parsers.docx_branch_piano import DocxBranchPianoParser
 
 def get_parser(file_path: Path) -> BaseParser | None:
-    """Возвращает подходящий парсер для файла или None."""
     name_lower = file_path.name.lower()
     suffix = file_path.suffix.lower()
 
-    # 1. Правила по ключевым словам
-    for keywords, ext, parser_cls in _PARSER_RULES:
-        if all(kw in name_lower for kw in keywords):
-            if ext is None or suffix == ext:
-                return parser_cls()
+    # 1. Филиалы (branch или филиал)
+    if "branch" in name_lower or "филиал" in name_lower:
+        if suffix == ".docx":
+            return DocxBranchPianoParser()
 
-    # 2. Специальная логика для ph_choir (распознавание по содержимому)
+    # 2. Сезон / План Хора (НОВОЕ!)
+    # Ловим файлы где есть "сезон" ИЛИ ("план" и "хор")
+    if suffix == ".docx":
+        if "сезон" in name_lower or "season" in name_lower:
+            return DocxSeasonParser()
+        if "план" in name_lower and "хор" in name_lower:
+            return DocxSeasonParser()
+
+    # 3. Консерватория (УГК)
+    if any(k in name_lower for k in ["угк", "консерватория", "ugk"]):
+        if suffix in [".xlsx", ".xls"]:
+            return ExcelUgkParser()
+
+    # 4. Ельцин Центр
+    if any(k in name_lower for k in ["ельцин", "piano", "заявка"]):
+        if suffix == ".docx":
+            return DocxPianoServiceParser()
+
+    # 5. Залы Филармонии (PDF)
+    if any(k in name_lower for k in ["зал", "hall", "план на неделю"]):
+        if suffix == ".pdf":
+            return PdfHallScheduleParser()
+
+    # 6. Хор (недельный)
     if "ph_choir" in name_lower:
-        if suffix == ".xlsx" or suffix == ".xls":
+        if suffix in [".xlsx", ".xls"]:
             return ExcelChoirParser()
-        elif suffix == ".pdf":
-            choir_parser = _detect_choir_parser(file_path)
-            if choir_parser:
-                return choir_parser
 
-    # 3. Fallback по расширению
-    fallback_cls = _FALLBACK_MAP.get(suffix)
-    if fallback_cls:
-        return fallback_cls()
+    # Fallback (если ничего не подошло)
+    if suffix == ".pdf": return PdfHallScheduleParser()
+    if suffix == ".docx": return DocxPianoServiceParser()
+    if suffix in [".xlsx", ".xls"]: return ExcelUgkParser()
 
     return None

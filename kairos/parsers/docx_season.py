@@ -1,7 +1,9 @@
-"""Парсер плана сезона хора из DOCX."""
+"""Парсер сезонного плана Филармонии (DOCX) — полная версия."""
+
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
+from loguru import logger
 
 from docx import Document
 
@@ -10,115 +12,92 @@ from kairos.parsers.base import BaseParser
 
 
 class DocxSeasonParser(BaseParser):
-    """Парсит план сезона из Word-документа."""
-
-    # Регулярка для поиска дат вида "11.09" или "11 .09"
-    DATE_PATTERN = re.compile(r"(\d{1,2})\s*[./]\s*(\d{1,2})")
-    # Регулярка для поиска времени вида "19:00"
-    TIME_PATTERN = re.compile(r"(\d{1,2}):(\d{2})")
+    ORG_NAME = "Сезон Хора"
 
     def parse(self, file_path: Path) -> list[Event]:
         self.validate_file(file_path, ".docx")
-        events: list[Event] = []
-
-        doc = Document(file_path)
-        for table in doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    new_events = self._parse_cell(cell.text, file_path.name)
-                    events.extend(new_events)
-
-        return events
-
-    def _parse_cell(self, text: str, source: str) -> list[Event]:
-        """Парсит содержимое ячейки таблицы. Одна ячейка может содержать несколько концертов."""
-        if not text.strip():
-            return []
-
-        events: list[Event] = []
-        # Разбиваем текст на блоки по датам
-        blocks = self._split_by_dates(text)
-
-        for block in blocks:
-            event = self._parse_block(block, source)
-            if event is not None:
-                events.append(event)
-
-        return events
-
-    def _split_by_dates(self, text: str) -> list[str]:
-        """Разбивает текст на блоки, каждый начинается с даты."""
-        # Находим все позиции дат
-        matches = list(self.DATE_PATTERN.finditer(text))
-        if not matches:
-            return []
-
-        blocks: list[str] = []
-        for i, match in enumerate(matches):
-            start = match.start()
-            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-            blocks.append(text[start:end].strip())
-
-        return blocks
-
-    def _parse_block(self, block: str, source: str) -> Event | None:
-        """Парсит один блок текста (один концерт)."""
-        # Извлекаем дату
-        date_match = self.DATE_PATTERN.search(block)
-        if not date_match:
-            return None
-
-        day = int(date_match.group(1))
-        month = int(date_match.group(2))
-
-        # Определяем год: месяцы 9-12 → 2026, 1-8 → 2027
-        year = 2026 if month >= 9 else 2027
+        events = []
 
         try:
-            base_date = datetime(year, month, day)
-        except ValueError:
-            return None
+            doc = Document(file_path)
 
-        # Извлекаем время
-        time_match = self.TIME_PATTERN.search(block)
-        if not time_match:
-            return None
+            # 1. Собираем весь текст из ТАБЛИЦ (основной источник)
+            full_text = ""
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        full_text += cell.text + "\n"
 
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2))
-        start = base_date.replace(hour=hour, minute=minute)
-        end = start + timedelta(hours=2)  # Концерт по умолчанию 2 часа
+            # 2. Добавляем текст из параграфов (на всякий случай)
+            for para in doc.paragraphs:
+                full_text += para.text + "\n"
 
-        # Проверяем "Планируется"
-        is_planned = "планируется" in block.lower()
-        priority = Priority.P2 if is_planned else Priority.P0
+            # Разбиваем на строки для обработки
+            lines = full_text.split('\n')
 
-        # Очищаем название: убираем дату, время, день недели
-        title = self._clean_title(block)
-        if not title:
-            return None
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
 
-        return Event(
-            title=title,
-            start=start,
-            end=end,
-            event_type=EventType.CONCERT,
-            priority=priority,
-            source_file=source,
-            description="Планируется" if is_planned else "",
-        )
+                # Ищем дату в формате ДД.ММ
+                # Примеры строк:
+                # "11 .09,  пт, 19 :00,  Аб. 5 Бриттен..."
+                # "28.10, ср. Зарядье Гаврилин..."
 
-    @staticmethod
-    def _clean_title(block: str) -> str:
-        """Убирает дату, время, день недели из блока, оставляя описание концерта."""
-        # Убираем дату (11.09, пт,)
-        cleaned = re.sub(r"\d{1,2}\s*[./]\s*\d{1,2},?\s*", "", block)
-        # Убираем день недели
-        cleaned = re.sub(r"(пн|вт|ср|чт|пт|сб|вск|вс),?\s*", "", cleaned, flags=re.IGNORECASE)
-        # Убираем время
-        cleaned = re.sub(r"\d{1,2}:\d{2},?\s*", "", cleaned)
-        # Убираем "Аб." с номером
-        cleaned = re.sub(r"Аб\.\s*\d*\s*", "", cleaned)
-        # Чистим лишние пробелы и запятые
-        cleaned = re.sub(r"[,\s]+", " ", cleaned).strip()
-        return cleaned
+                # Регулярка: День.Месяц, (опционально день недели), (опционально время), Описание
+                match = re.search(r'(\d{1,2})\s*\.\s*(\d{1,2}),?\s*[а-яёA-Za-z]*\.?\s*,?\s*(?:(\d{1,2})\s*:\s*(\d{2}))?\s*,?\s*(.*)', line)
+
+                if match:
+                    day = int(match.group(1))
+                    month = int(match.group(2))
+                    hour = match.group(3)
+                    minute = match.group(4)
+                    description = match.group(5).strip()
+
+                    # Убираем мусор в начале описания (например "Аб. 5")
+                    # Но оставляем само название концерта
+                    description = re.sub(r'^Аб\.\s*\d+\s*', '', description)
+
+                    if not description:
+                        continue
+
+                    try:
+                        # Определяем год (Сезон 2026-2027)
+                        year = 2026
+                        if month < 9: # Янв-Авг -> 2027
+                            year = 2027
+
+                        base_date = datetime(year, month, day)
+
+                        start_dt = None
+                        end_dt = None
+
+                        if hour and minute:
+                            start_dt = base_date.replace(hour=int(hour), minute=int(minute))
+                            end_dt = start_dt + timedelta(hours=2)
+                        else:
+                            # Без времени -> весь день
+                            start_dt = base_date.replace(hour=0, minute=0)
+                            end_dt = base_date.replace(hour=23, minute=59)
+
+                        # Формируем событие
+                        # В title пишем полное описание, чтобы было видно в календаре
+                        events.append(Event(
+                            title=f"[{self.ORG_NAME}] {description}",
+                            start=start_dt,
+                            end=end_dt,
+                            event_type=EventType.CONCERT,
+                            priority=Priority.P0,
+                            source_file=file_path.name,
+                            location="Филармония"
+                        ))
+
+                    except ValueError:
+                        continue
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка парсинга сезона {file_path.name}: {e}")
+
+        logger.info(f"✅ Сезон Хора: {len(events)} событий")
+        return events
